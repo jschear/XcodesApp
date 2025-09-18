@@ -138,20 +138,47 @@ public extension URLRequest {
         return URLRequest(url: .olympusSession)
     }
     
-    static func federate(account: String, serviceKey: String) throws -> URLRequest {
-        struct FederateRequest: Encodable {
-            let accountName: String
-            let rememberMe: Bool
-        }
+    static func signIn() -> URLRequest {
         var request = URLRequest(url: .signIn)
         request.allHTTPHeaderFields?["Accept"] = "application/json"
         request.allHTTPHeaderFields?["Content-Type"] = "application/json"
         request.httpMethod = "GET"
+        return request
+    }
+    
+    static func federate(account: String) -> URLRequest {
+        struct FederateRequest: Encodable {
+            let accountName: String
+            let rememberMe = true
+        }
         
-//        let encoder = JSONEncoder()
-//        encoder.outputFormatting = .withoutEscapingSlashes
-//        request.httpBody = try encoder.encode(FederateRequest(accountName: account, rememberMe: true))
+        var request = URLRequest(url: .federate)
+        request.allHTTPHeaderFields = request.allHTTPHeaderFields ?? [:]
+        request.allHTTPHeaderFields?["Accept"] = "application/json"
+        request.allHTTPHeaderFields?["Content-Type"] = "application/json"
+        request.httpMethod = "POST"
+        request.httpBody = try! JSONEncoder().encode(FederateRequest(accountName: account))
         
+        return request
+    }
+    
+    static func federatedIdpLogin(federatedRequest: FederatedIdpRequest) throws -> URLRequest {
+        var components = URLComponents(string: federatedRequest.idPUrl)!
+        components.queryItems = [
+            URLQueryItem(name: "login_hint", value: federatedRequest.requestParams.login_hint),
+            URLQueryItem(name: "scope", value: federatedRequest.requestParams.scope),
+            URLQueryItem(name: "response_type", value: federatedRequest.requestParams.response_type),
+            URLQueryItem(name: "redirect_url", value: federatedRequest.requestParams.redirect_uri),
+            URLQueryItem(name: "state", value: federatedRequest.requestParams.state),
+            URLQueryItem(name: "nonce", value: federatedRequest.requestParams.nonce),
+            URLQueryItem(name: "client_id", value: federatedRequest.requestParams.client_id)
+        ]
+        
+        var request = URLRequest(url: components.url!)
+        request.allHTTPHeaderFields = request.allHTTPHeaderFields ?? [:]
+        request.allHTTPHeaderFields?["Accept"] = "application/json"
+        request.allHTTPHeaderFields?["Content-Type"] = "application/json"
+        request.httpMethod = federatedRequest.httpMethod
         return request
     }
     

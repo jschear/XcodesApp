@@ -1,5 +1,6 @@
 import AppKit
 import AppleAPI
+import AuthenticationServices
 import Combine
 import Path
 import LegibleError
@@ -265,36 +266,45 @@ class AppState: ObservableObject {
                     let username = self.savedUsername,
                     let password = try? Current.keychain.getString(username)
                 else {
-                    return Fail(error: error) 
+                    return Fail(error: error)
                         .eraseToAnyPublisher()
                 }
 
+                // TODO what to do about context?
                 return self.signIn(username: username, password: password)
                     .map { _ in Void() }
                     .eraseToAnyPublisher()
             }
             .eraseToAnyPublisher()
     }
-    
-    func signIn(username: String, password: String) {
+
+    func signIn(username: String, password: String, presentationContext: ASWebAuthenticationPresentationContextProviding? = nil) {
         authError = nil
-        signIn(username: username.lowercased(), password: password)
+        signIn(username: username.lowercased(), password: password, presentationContext: presentationContext)
             .sink(
                 receiveCompletion: { _ in },
                 receiveValue: { _ in }
             )
             .store(in: &cancellables)
     }
-    
-    func signIn(username: String, password: String) -> AnyPublisher<AuthenticationState, Error> {
-        try? Current.keychain.set(password, key: username)
+
+    func signIn(username: String, password: String, presentationContext: ASWebAuthenticationPresentationContextProviding? = nil) -> AnyPublisher<AuthenticationState, Error> {
+        if !password.isEmpty {
+            try? Current.keychain.set(password, key: username)
+        }
         Current.defaults.set(username, forKey: "username")
-        
+
         isProcessingAuthRequest = true
-        return client.srpLogin(accountName: username, password: password)
+
+        let publisher = if password.isEmpty {
+            client.federatedLogin(accountName: username, presentationContext: presentationContext!)
+        } else {
+            client.srpLogin(accountName: username, password: password)
+        }
+        return publisher
             .receive(on: DispatchQueue.main)
             .handleEvents(
-                receiveOutput: { authenticationState in 
+                receiveOutput: { authenticationState in
                     self.authenticationState = authenticationState
                 },
                 receiveCompletion: { completion in

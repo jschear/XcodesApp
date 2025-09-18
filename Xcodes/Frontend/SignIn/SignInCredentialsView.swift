@@ -1,4 +1,5 @@
 import SwiftUI
+import AuthenticationServices
 
 struct SignInCredentialsView: View {
     private enum FocusedField {
@@ -48,17 +49,23 @@ struct SignInCredentialsView: View {
                     .keyboardShortcut(.cancelAction)
                 ProgressButton(
                     isInProgress: appState.isProcessingAuthRequest,
-                    action: { appState.signIn(username: username, password: password) },
+                    action: { appState.signIn(username: username, password: password, presentationContext: PresentationContext()) },
                     label: {
                         Text("Next")
                     }
                 )
-                .disabled(username.isEmpty || password.isEmpty)
+                .disabled(username.isEmpty)
                 .keyboardShortcut(.defaultAction)
             }
             .frame(height: 25)
         }
         .padding()
+    }
+}
+
+public final class PresentationContext: NSObject, ASWebAuthenticationPresentationContextProviding {
+    public func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+        ASPresentationAnchor()
     }
 }
 

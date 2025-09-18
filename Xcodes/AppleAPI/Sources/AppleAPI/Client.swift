@@ -3,6 +3,7 @@ import Combine
 import SRP
 import Crypto
 import CommonCrypto
+import AuthenticationServices
 
 
 public class Client {
@@ -28,12 +29,11 @@ public class Client {
                 // Fixes issue https://github.com/RobotsAndPencils/XcodesApp/issues/360
                 // On 2023-02-23, Apple added a custom implementation of hashcash to their auth flow
                 // Without this addition, Apple ID's would get set to locked
-                return self.loadHashcash(accountName: accountName, serviceKey: serviceKey)
+                return self.loadHashcash()
                     .map { return (serviceKey, $0)}
                     .eraseToAnyPublisher()
             }
             .flatMap { (serviceKey, hashcash) -> AnyPublisher<(String, String, ServerSRPInitResponse), Swift.Error> in
-                
                 return Current.network.dataTask(with: URLRequest.SRPInit(serviceKey: serviceKey, a: Data(a.bytes).base64EncodedString(), accountName: accountName))
                     .map(\.data)
                     .decode(type: ServerSRPInitResponse.self, decoder: JSONDecoder())
@@ -78,7 +78,7 @@ public class Client {
                     .decode(type: SignInResponse.self, decoder: JSONDecoder())
                     .flatMap { responseBody -> AnyPublisher<AuthenticationState, Swift.Error> in
                         let httpResponse = response as! HTTPURLResponse
-                        
+                                                
                         switch httpResponse.statusCode {
                         case 200:
                             return Current.network.dataTask(with: URLRequest.olympusSession)
@@ -109,10 +109,9 @@ public class Client {
             .eraseToAnyPublisher()
     }
     
-    func loadHashcash(accountName: String, serviceKey: String) -> AnyPublisher<String, Swift.Error> {
-        
+    func loadHashcash() -> AnyPublisher<String, Swift.Error> {
         Result {
-            try URLRequest.federate(account: accountName, serviceKey: serviceKey)
+            try URLRequest.signIn()
         }
         .publisher
         .flatMap { request in
@@ -124,7 +123,6 @@ public class Client {
                     }
                     switch urlResponse.statusCode {
                     case 200..<300:
-                        
                         let httpResponse = response as! HTTPURLResponse
                         guard let bitsString = httpResponse.allHeaderFields["X-Apple-HC-Bits"] as? String, let bits = UInt(bitsString) else {
                             throw AuthenticationError.invalidHashcash
@@ -264,6 +262,76 @@ public class Client {
                 }
         }.eraseToAnyPublisher()
     }
+    
+    // MARK: - Federated Login/SSO
+    
+    public func federatedLogin(accountName: String, presentationContext: ASWebAuthenticationPresentationContextProviding?) -> AnyPublisher<AuthenticationState, Swift.Error> {
+        return Current.network.dataTask(with: URLRequest.federate(account: accountName))
+            .mapError { $0 as Swift.Error }
+            .tryMap { result -> Data in
+                let httpResponse = result.response as! HTTPURLResponse
+                
+                // TODO: do we need to handle any HTTP error codes here?
+//                if httpResponse.statusCode == 401 {
+//                    throw AuthenticationError.notAuthorized
+//                }
+
+                return result.data
+            }
+            .decode(type: FederateResponse.self, decoder: JSONDecoder())
+            .receive(on: DispatchQueue.main)
+            .flatMap { response -> AnyPublisher<AuthenticationState, Swift.Error> in
+                if response.federated {
+                    
+                    // TODO handle error
+                    var urlComponents = URLComponents(string: response.federatedIdpRequest.idPUrl)!
+                    urlComponents.queryItems = response.federatedIdpRequest.requestParams.toURLQueryItems()
+                    let idpUrl = urlComponents.url!
+                    
+                    return Deferred {
+                        Future<URL, Error> { promise in
+                            let session = ASWebAuthenticationSession(url: idpUrl, callbackURLScheme: "xcodes") { (callbackURL: URL?, error: (any Error)?) in
+                                if let url = callbackURL {
+                                    promise(.success(url))
+                                } else {
+                                    promise(.failure(error ?? NSError(domain: "", code: 0, userInfo: nil)))
+                                }
+                            }
+                            session.presentationContextProvider = presentationContext
+                            session.prefersEphemeralWebBrowserSession = true
+                            session.start()
+                        }
+                    }
+                    .map {_ in 
+                        AuthenticationState.unauthenticated
+                    }
+                    .eraseToAnyPublisher()
+                    
+                    
+                    
+                    // Trigger SSO flow somehow?
+//                    return Result {
+//                        try URLRequest.federatedIdpLogin(federatedRequest: response.federatedIdpRequest)
+//                    }
+//                        .publisher
+//                        .flatMap { request in Current.network.dataTask(with: request)
+//                            .mapError { $0 as Error }
+//                        }
+//                        .map {
+//                            print($0)
+//                        }
+//                        .map {
+//                            AuthenticationState.unauthenticated
+//                        }
+//                        .eraseToAnyPublisher()
+                } else {
+                    return Fail(error: AuthenticationError.notAuthorized)
+                        .eraseToAnyPublisher()
+                }
+            }
+            .eraseToAnyPublisher()
+    }
+    
     
     // MARK: - Session
     
@@ -592,7 +660,48 @@ public struct ServerSRPInitResponse: Decodable {
     let `protocol`: SRPProtocol
 }
 
+public struct FederateResponse: Decodable, Equatable {
+    let federated: Bool
+    let showFederatedIdpConfirmation: Bool
+    let federatedAuthIntro: FederatedAuthIntro
+    let federatedIdpRequest: FederatedIdpRequest
+}
 
+public struct FederatedAuthIntro: Decodable, Equatable {
+    let idpName: String
+    let accountManagementUrl: String
+    let orgType: String
+    let orgName: String
+    let idpUrl: String
+}
+
+public struct FederatedIdpRequest: Decodable, Equatable {
+    let idPUrl: String
+    let httpMethod: String
+    let requestParams: FederatedRequestParams
+}
+
+public struct FederatedRequestParams: Decodable, Equatable, Encodable {
+    let login_hint: String
+    let scope: String
+    let response_type: String
+    let redirect_uri: String
+    let state: String
+    let nonce: String
+    let client_id: String
+    
+    public func toURLQueryItems() -> [URLQueryItem] {
+        return [
+            URLQueryItem(name: "login_hint", value: login_hint),
+            URLQueryItem(name: "scope", value: scope),
+            URLQueryItem(name: "response_type", value: response_type),
+            URLQueryItem(name: "redirect_uri", value: redirect_uri),
+            URLQueryItem(name: "state", value: state),
+            URLQueryItem(name: "nonce", value: nonce),
+            URLQueryItem(name: "client_id", value: client_id),
+        ]
+    }
+}
 
 extension String {
     func base64ToU8Array() -> Data {
